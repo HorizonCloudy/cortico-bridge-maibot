@@ -1,0 +1,29 @@
+{
+  "manifest_version": 2,
+  "id": "io.cortico.bridge-maibot",
+  "name": "Cortico Bridge",
+  "version": "0.1.0",
+  "description": "Cortico 与 MaiBot 的 CBP 帧桥：入站经 gateway.route_message 注入 MessageDict；只走新 capabilities，不碰 compat 门面（理由见 README）。",
+  "author": { "name": "Cortico", "url": "https://github.com/cortico-bridge" },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/cortico-bridge/cortico-bridge-maibot",
+    "homepage": "https://github.com/cortico-bridge/cortico-bridge-maibot#readme",
+    "issues": "https://github.com/cortico-bridge/cortico-bridge-maibot/issues"
+  },
+  "host_application": { "min_version": "1.4.5", "max_version": "1.4.99" },
+  "sdk": { "min_version": "2.23.0", "max_version": "2.99.99" },
+  "dependencies": [],
+  "llm_providers": [],
+  "capabilities": [
+    "gateway.route_message"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "locales_path": null,
+    "supported_locales": ["zh-CN", "en-US"]
+  },
+  "plugin_type": "extension",
+  "display": null,
+  "changelog": null
+}
