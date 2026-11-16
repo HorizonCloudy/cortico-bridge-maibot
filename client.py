@@ -4,14 +4,16 @@
 （cap.call / host.route_message / host.update_message_gateway_state，context.py:137-143
 @f9984673d），从模型上就没打算让插件开服务，所以桥=纯外拨客户端（蓝图 §2.2 MaiBot 卡）。
 入站链：CBP `msg` → mdict.frame_to_message_dict → ctx.gateway.route_message（kwargs 形）。
-出站链（send 腿）阶段二再开，本件只把帧送到 host_to_world 队列。
+出站链：call → sender.handle_call → reply；turn 账本记 route_frame 见过的入站 msg 帧 id（F3/G-K1-C6）。
 """
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import OrderedDict
 from typing import Any
 
-from . import cbp, mdict, pins as pins_mod
+from . import cbp, mdict, pins as pins_mod, sender
 from .caps import BRIDGE_CAPS
 
 AGENT_NAME = "cortico-bridge-maibot"
@@ -22,6 +24,17 @@ AGENT_SHA = "unpinned"  # 由 fleet pins 流程回填（G1）
 _BACKOFF_BASE_S, _BACKOFF_CAP_S = 1.0, 30.0
 # hello 之后 Cortico 侧 ready 握手等待上限（world start() 12s 放行口径，§2.3 硬规则 2）
 _HANDSHAKE_TIMEOUT_S = 12.0
+# turn 账本窗（G-K1-C6，§5.1 rid 缓存口径先例 cortico-bridge-neko/turns.py:24-25）
+_TURN_TTL_S, _TURN_CAP = 300.0, 200
+
+# hello.tools 申报面 = sender.handle_call 真实现的两支（形状照 neko __init__.py:25-29）。
+# 改名/删工具必须与 sender.py 同批，且 fleet world.ts PEER_CAPABILITIES 同批镜像
+# （hello-authority 闸；SECURITY-CBP §7 N3「申报=可达」）。
+# 不写类型注解：fleet hello-authority.test.ts:33 按文本回读本常量，注解里的 `]` 会截断它的正则。
+_BRIDGE_TOOLS = [
+    {"name": "maibot_send", "risk": "write", "confirm_required": True},
+    {"name": "chat.get_all_streams", "risk": "read", "confirm_required": False},
+]
 
 
 class BridgeClient:
@@ -33,6 +46,8 @@ class BridgeClient:
         self._task: asyncio.Task[None] | None = None
         self._seen = 0
         self._ws: Any | None = None  # 当前连接；run() 维护，供 reply 出帧
+        # F3 turn 账本（G-K1-C6）：route_frame 见过的入站 msg 帧 id → 失效时刻。
+        self._turns: "OrderedDict[str, float]" = OrderedDict()
 
     def uri(self) -> str:
         return pins_mod.bridge_ws_uri(pins_mod.load_pins(), "cortico_world_maibot_ws")
@@ -51,17 +66,36 @@ class BridgeClient:
         return cbp.hello_frame(
             AGENT_NAME, AGENT_VERSION, AGENT_SHA,
             caps=list(BRIDGE_CAPS),
-            # call 腿未接线（发信腿属阶段二 sender.py 工单，见 README「欠账」），
-            # 零可达工具就零申报——申报调不通的 maibot_send/maibot_streams 是谎言。
-            tools=[],
+            # 发信腿已接线（sender.py，工单 K1）：申报面必须等于真可达面，
+            # fleet world.ts PEER_CAPABILITIES 同批镜像（SECURITY-CBP §7 N3）。
+            tools=list(_BRIDGE_TOOLS),
             self_decl=cbp.make_self_decl(),
         )
+
+    def _record_turn(self, frame: dict[str, Any]) -> None:
+        fid = frame.get("id")
+        if not isinstance(fid, str) or not fid:
+            return
+        self._turns.pop(fid, None)
+        self._turns[fid] = time.monotonic() + _TURN_TTL_S
+        while len(self._turns) > _TURN_CAP:
+            self._turns.popitem(last=False)
+
+    def _turn_seen(self, turn: Any) -> bool:
+        if not isinstance(turn, str):
+            return False
+        exp = self._turns.get(turn)
+        if exp is None or time.monotonic() > exp:
+            self._turns.pop(turn, None)
+            return False
+        return True
 
     async def route_frame(self, frame: dict[str, Any]) -> bool:
         """CBP msg → 宿主 route_message。返回宿主 accepted 位；False=未接收
         （错误约定：重试一次仍 False 即向 Cortico 侧报 60007，蓝图 §3.4-2）。"""
         if frame.get("t") != "msg":
             return False
+        self._record_turn(frame)  # G-K1-C6：call.turn 的权威来源=这张入站记录
         md = mdict.frame_to_message_dict(frame)
         kw = mdict.route_kwargs(frame)
         ctx = self.plugin.ctx  # 链根必须落 `ctx`：manifest_scan 只认 ctx/self.ctx/plugin.ctx 三根
@@ -81,22 +115,26 @@ class BridgeClient:
             await self.route_frame(frame)
             return
         if frame["t"] == "call":
-            # 最小 call 腿：桥零可达工具（tools 申报为空），到货的 call 一律回
-            # 60002 capability_unavailable——不许静默，静默会被内核 30s 相关超时
-            # 译成 60007（CBP-v1.json:545）。码与 neko 同（__init__.py:173）。
-            await self._send(cbp.make_frame(
-                "reply", rid=frame["rid"], ok=False,
-                error={"code": 60002, "message": "cortico-bridge-maibot: 本桥零申报工具，发信腿属阶段二工单"},
-            ))
+            rid = frame["rid"]
+            if not self._turn_seen(frame.get("turn")):
+                # F3：turn 查无入站记录拒执行（CBP-v1.json:499；neko __init__.py:140-143 先例）。
+                await self._send(cbp.make_frame(
+                    "reply", rid=rid, ok=False,
+                    error={"code": 60004, "message": f"unknown_session: turn={frame.get('turn')!r} 无对应入站记录"},
+                ))
+                return
+            ctx = self.plugin.ctx if self.plugin is not None else None
+            await self._send(await sender.handle_call(ctx, frame))
 
-    async def _send(self, frame: dict[str, Any]) -> None:
-        """出帧唯一口；没连接（_ws None）就丢，异常只断链、不抛穿 run 语义。"""
+    async def _send(self, frame: dict[str, Any]) -> bool:
+        """出帧唯一口；没连接（_ws None）就丢并回报 False——cbp_gateway 的送达回执读这个位。"""
         if self._ws is None:
-            return
+            return False
         try:
             await self._ws.send(cbp.encode(frame))
+            return True
         except Exception:
-            pass
+            return False
 
     async def run(self) -> None:
         """外拨循环；永不抛出（start 语义照内核 driver）。enabled 缺省关，误启不联网。"""

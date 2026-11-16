@@ -16,7 +16,9 @@
   "dependencies": [],
   "llm_providers": [],
   "capabilities": [
-    "gateway.route_message"
+    "chat.get_all_streams",
+    "gateway.route_message",
+    "send.text"
   ],
   "i18n": {
     "default_locale": "zh-CN",

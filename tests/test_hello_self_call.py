@@ -12,14 +12,16 @@
   proven:false，本腿自回声抑制不可用（README「self 申报」节同口径）。
 - SECURITY-CBP.md:77：self_echo cap 不得与 proven:true 之外同现——proven:false 时
   报该 cap 即 caps-lie，闸在本文件钉死。
-- call 腿：发信腿属阶段二工单（plugin.py cbp_gateway 注释），桥零可达工具；
-  hello 不得申报调不通的工具，到货 call 不得静默——静默会被内核 30s 相关超时
-  译成 60007（CBP-v1.json:545）。先例 neko `__init__.py:173` 回 60002
-  capability_unavailable，本仓同码。
+- call 腿：K1（sender.py）已接线，hello.tools 申报两支真可达面（`maibot_send`、
+  `chat.get_all_streams`）；申报不可达工具=对模型撒谎（SECURITY-CBP §7 N3），
+  本文件 `test_hello_advertises_only_reachable_tools` 是它的镜像闸。到货 call
+  不得静默——静默会被内核 30s 相关超时译成 60007（CBP-v1.json:545）。先例 neko
+  `__init__.py:173` 回 60002 capability_unavailable，本仓同码。
 """
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 SELF_HONEST = {"id": "", "name": "", "proven": False}  # hello_proven_false 逐字（conformance.json）
 
@@ -35,14 +37,27 @@ def test_hello_self_declared_downgrade_explicitly(pkg):
     assert pkg.cbp.decode(pkg.cbp.encode(h)) is not None, "hello 出帧必须过同一 codec 校验"
 
 
-def test_hello_advertises_no_unreachable_tools(pkg):
-    """call 处理通路没有接线前 tools 必须为空：申报不可达工具=对模型撒谎。"""
+def test_hello_advertises_only_reachable_tools(pkg):
+    """申报面 = sender.handle_call 真分支（SECURITY-CBP §7 N3）。
+
+    K1 接线后 tools 不再为空。本测试是 N3 的镜像闸：在 client._BRIDGE_TOOLS
+    加名却没在 sender 落分支，或反过来，这里立刻红。fleet 侧
+    hello-authority.test.ts 按文本回读同一常量，两闸同批改。
+    """
     h = pkg.client.BridgeClient(plugin=None).hello()
-    assert h["tools"] == [], f"桥无 call 腿却申报了工具：{h['tools']!r}"
+    declared = [t["name"] for t in h["tools"]]
+    src = inspect.getsource(pkg.sender.handle_call)
+    wired = [n for n in declared if f'tool == "{n}"' in src]
+    assert declared == wired, f"申报却未接线的工具：{set(declared) - set(wired)}"
+    assert declared == ["maibot_send", "chat.get_all_streams"], f"申报面漂移：{declared}"
 
 
 def test_inbound_call_gets_error_reply_not_silence(pkg):
-    """到货 call：回 reply{ok:false, code:60002, rid 回填}，不拖成内核 60007。"""
+    """到货 call：回 reply{ok:false, code:60002, rid 回填}，不拖成内核 60007。
+
+    工具名取未申报也未接线的 `chat.open_session`：`maibot_send` 自 K1 起走真腿，
+    拿它测 60002 会测成 60008。turn 先由入站 msg 帧记账（C6），否则先撞 60004。
+    """
     client = pkg.client.BridgeClient(plugin=None)
     sent: list[str] = []
 
@@ -51,11 +66,18 @@ def test_inbound_call_gets_error_reply_not_silence(pkg):
             sent.append(data)
 
     client._ws = FakeWs()
-    call = pkg.cbp.make_frame("call", id="cl1", ts=1.0, rid="q9", tool="maibot_send",
+    # 先让 turn="m1" 在账本里存在（C6 的权威来源=入站 msg 帧记录）。端到端的
+    # 「入站 msg → call 可用」链路由 cortico-bridge-maibot/tests/test_sender.py
+    # 的 test_client_records_inbound_msg_turn_and_call_flows_to_sender 钉，
+    # 本例只测 60002 一支，不重复拽宿主注入面。
+    client._record_turn({"t": "msg", "id": "m1"})
+    pre = len(sent)
+    call = pkg.cbp.make_frame("call", id="cl1", ts=1.0, rid="q9", tool="chat.open_session",
                               args={}, turn="m1", actor=dict(ACTOR))
     asyncio.run(client.feed(pkg.cbp.encode(call)))
-    assert len(sent) == 1, "call 被吞：桥静默会被内核 30s 超时译成 60007（CBP-v1.json:545）"
-    reply = pkg.cbp.decode(sent[0])
+    fresh = sent[pre:]
+    assert len(fresh) == 1, "call 被吞：桥静默会被内核 30s 超时译成 60007（CBP-v1.json:545）"
+    reply = pkg.cbp.decode(fresh[0])
     assert reply is not None and reply["t"] == "reply", reply
     assert reply["rid"] == "q9" and reply["ok"] is False
     assert reply["error"]["code"] == 60002, "60002=capability_unavailable，与 neko 同码（__init__.py:173）"

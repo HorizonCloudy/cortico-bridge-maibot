@@ -21,10 +21,12 @@ from maibot_sdk.components import collect_components
 
 from .client import BridgeClient
 from .observer import mirror_on_message
+from . import sender
 
 
 class CorticoBridgePlugin(MaiBotPlugin):
-    """CBP 桥插件。骨架只做：声明 duplex 网关、挂 ON_MESSAGE 镜像、带一个外拨客户端对象。
+    """CBP 桥插件。职责：声明 duplex 网关（入站注入 + send 方向回包转发）、挂 ON_MESSAGE
+    镜像、带一个外拨客户端对象；call 处理腿在 client.feed → sender.handle_call。
 
     默认 enabled=False：不联网、不起宿主、不拨号；部署时经宿主配置显式打开。
     入站唯一口 = ctx.gateway.route_message（kwargs 形，见 mdict.route_kwargs）。
@@ -80,13 +82,25 @@ class CorticoBridgePlugin(MaiBotPlugin):
         account_id="",  # 部署配置回填 self_id；代码不写死账号
         scope="",
     )
-    async def cbp_gateway(self, message: Any, **_: Any) -> None:
-        """duplex 网关的 send 方向腿占位（阶段二 sender.py 工单）。骨架期不发消息。
+    async def cbp_gateway(self, message: Any, **_: Any) -> dict[str, Any]:
+        """duplex 网关的 send 方向腿（工单 K1 真调，G-K1-C4）。
 
         route_type=duplex 是蓝图 §2.2 钉的唯一入站协议口形状；本方法被宿主派发时
         message 同样是 dict（r-maibot §9），不做属性访问、不碰 compat。
+        回执纪律：plugin_driver.py:221-227 @478f671e6 把 None 判成 SENT 假成功——
+        所以转发不动必须回 {"success": False, "error": ...}，真送达回 external_message_id。
         """
-        return None
+        if not isinstance(message, dict):
+            return {"success": False, "error": "cbp_gateway: message 非 dict，不代发"}
+        client = self._client
+        if client is None:
+            return {"success": False, "error": "cbp_gateway: link 未启用（enabled=false），不代发"}
+        frame = sender.gateway_msg_frame(message)
+        if frame is None:
+            return {"success": False, "error": "cbp_gateway: 缺 session_id 或段表为空，造不出 msg 帧"}
+        if not await client._send(frame):
+            return {"success": False, "error": "cbp_gateway: Cortico 侧未连接或出帧失败"}
+        return {"success": True, "external_message_id": frame["id"]}
 
 
 def create_plugin() -> CorticoBridgePlugin:
