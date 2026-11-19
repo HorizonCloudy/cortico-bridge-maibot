@@ -15,7 +15,9 @@ import os
 from typing import Any
 
 ENV_VAR = "CORTICO_PINS_JSON"
+TOKEN_ENV = "CORTICO_BRIDGE_TOKEN"  # SECURITY-CBP.md:121；只从环境读，不落插件配置文件
 HOST = "127.0.0.1"  # loopback：Cortico 侧监听缺省绑环回（§4.4 绑定面列）
+_QUERY_CRED_KEYS = ("token", "access_token")  # §3 拒停的查询参数名（driver.ts 同表）
 
 
 def load_pins(path: str | None = None) -> dict[str, Any]:
@@ -43,6 +45,29 @@ def port_of(pins: dict[str, Any], key: str) -> int:
     return int(value)
 
 
+def _assert_clean_uri(uri: str) -> str:
+    """凭据禁过 URL（SECURITY-CBP.md:115）：带 query 的 URI 一律拒，不做比对直接挡。"""
+    if "?" in uri or any(f"{s}=" in uri for s in _QUERY_CRED_KEYS):
+        raise ValueError(f"refuse credential-bearing URI: {uri.split('?')[0]!r}")
+    return uri
+
+
+def auth_headers(config: dict[str, Any] | None = None) -> dict[str, str]:
+    """共享密钥唯一出口：HTTP Upgrade 头 `Authorization: Bearer <token>`。
+
+    2026-11-19（11-13 判例）：缺密钥不再返回空头「环回免鉴权」，直接拒绝建链。
+    `config` 形参只为把「配置文件里的 token 一律无视」写成可测的码，本函数不读它的键。
+    """
+    del config  # 故意不读：凭据不落配置文件
+    token = os.environ.get(TOKEN_ENV, "").strip()
+    if not token:
+        raise RuntimeError(
+            f"缺少共享密钥：设环境变量 {TOKEN_ENV}（Cortico 侧用 ctx.secret 读同名键）；"
+            "本机任意网页都能连 WebSocket 端口，无密钥一律不建链"
+        )
+    return {"Authorization": f"Bearer {token}"}
+
+
 def bridge_ws_uri(pins: dict[str, Any], key: str = "cortico_world_maibot_ws") -> str:
-    """拼 Cortico 侧 world 的 ws:// URI。"""
-    return f"ws://{HOST}:{port_of(pins, key)}"
+    """拼 Cortico 侧 world 的 ws:// URI。零凭据：只有 scheme+host+port。"""
+    return _assert_clean_uri(f"ws://{HOST}:{port_of(pins, key)}")

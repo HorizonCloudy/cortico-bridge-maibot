@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import OrderedDict
 from typing import Any
@@ -144,10 +145,18 @@ class BridgeClient:
             import websockets
         except ImportError:  # 环境缺依赖只降级，不崩宿主
             return
+        # 2026-11-19：无共享密钥不建链，明确记一条日志后退出，不静默重试
+        # （浏览器 WebSocket 没有 CORS 预检，本机任意网页都能连环回端口；11-13 判例）。
+        try:
+            headers = pins_mod.auth_headers()
+        except RuntimeError as exc:
+            logging.getLogger(__name__).warning("Cortico Bridge: %s", exc)
+            return
         delay = _BACKOFF_BASE_S
         while True:
             try:
-                async with websockets.connect(self.uri(), open_timeout=12) as ws:
+                async with websockets.connect(self.uri(), open_timeout=12,
+                                              additional_headers=headers) as ws:
                     self._ws = ws
                     await ws.send(cbp.encode(self.hello()))
                     self.connected = True

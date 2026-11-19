@@ -27,6 +27,6 @@ def pins_file(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_credentials(monkeypatch):
-    for name in ("MAIBOT_TOKEN", "BOT_TOKEN", "NEKO_TOKEN", "API_KEY"):
+    for name in ("MAIBOT_TOKEN", "BOT_TOKEN", "NEKO_TOKEN", "API_KEY", "CORTICO_BRIDGE_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     yield
